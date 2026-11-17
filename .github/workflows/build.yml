@@ -85,6 +85,16 @@ jobs:
           file dist/recpill
           ./dist/recpill version
           bash scripts/package.sh macos dist/recpill dist
+      - name: Smoke run on the CI runner (informational: runners have no real audio hardware or permissions)
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          ./dist/recpill start --quiet --output "$RUNNER_TEMP/rp" || true
+          sleep 4
+          ./dist/recpill status || true
+          ./dist/recpill stop --quiet || true
+          echo "--- log"; cat "$HOME/Library/Application Support/RecPill/recpill.log" || true
+          ls -la "$RUNNER_TEMP/rp" || true
       - uses: actions/upload-artifact@v4
         with:
           name: macos
