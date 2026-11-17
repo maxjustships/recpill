@@ -85,7 +85,7 @@ jobs:
           file dist/recpill
           ./dist/recpill version
           bash scripts/package.sh macos dist/recpill dist
-      - name: Smoke run on the CI runner (informational: runners have no real audio hardware or permissions)
+      - name: "Smoke run on the CI runner (informational, no real audio hardware there)"
         continue-on-error: true
         timeout-minutes: 3
         run: |
