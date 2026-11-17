@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Toggle recording
+Name[ru]=Запись звонка
+Comment=Start or stop recording with one button
+Exec=@BIN@ toggle
+Icon=recpill
+Terminal=false
+Categories=AudioVideo;Audio;Recorder;
+Keywords=record;call;recpill;

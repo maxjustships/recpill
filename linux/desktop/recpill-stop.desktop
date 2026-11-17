@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Stop recording
+Name[ru]=Стоп записи
+Comment=Stop recording and save the file
+Exec=@BIN@ stop
+Icon=recpill
+Terminal=false
+Categories=AudioVideo;Audio;Recorder;
+Keywords=record;call;recpill;

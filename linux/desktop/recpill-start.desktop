@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Start recording
+Name[ru]=Старт записи
+Comment=Record the microphone and computer sound into one file
+Exec=@BIN@ start
+Icon=recpill
+Terminal=false
+Categories=AudioVideo;Audio;Recorder;
+Keywords=record;call;recpill;

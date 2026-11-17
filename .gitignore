@@ -1,0 +1,11 @@
+windows/dist/
+windows/build/
+macos/.build/
+macos/dist/
+dist/
+__pycache__/
+*.pyc
+*.pcm
+*.m4a
+*.mka
+*.wav
