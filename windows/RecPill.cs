@@ -163,17 +163,22 @@ static class App
         Stopwatch sw = Stopwatch.StartNew();
         bool auto = false;
         int n = 0;
-        // 100 ms ticks: every third one is a full device re-check (300 ms), the others only look at the meters of
-        // idle secondary outputs so that sound starting there is picked up quickly.
-        while (!stopEvent.WaitOne(100))
+        // Full device re-check every 300 ms. A second thread watches the meters of idle secondary outputs every 40 ms,
+        // so sound that starts on such an output is picked up within ~0.2 s instead of waiting for the next full poll.
+        Thread quick = new Thread(delegate() { while (!stopEvent.WaitOne(40)) { try { dm.QuickPoll(); } catch { } } });
+        quick.IsBackground = true; quick.Start();
+        while (!stopEvent.WaitOne(300))
         {
             n++;
-            try { if (n % 3 == 0) dm.Poll(); else dm.QuickPoll(); } catch (Exception ex) { LogLine("poll error: " + ex.Message); }
-            if (n % 300 == 0) LogLine("levels " + dm.Levels());
+            Stopwatch ps = Stopwatch.StartNew();
+            try { dm.Poll(); } catch (Exception ex) { LogLine("poll error: " + ex.Message); }
+            if (ps.ElapsedMilliseconds > 400) LogLine("slow poll: " + ps.ElapsedMilliseconds + " ms");
+            if (n % 100 == 0) LogLine("levels " + dm.Levels());
             if (mixer.Failed != null) { LogLine("writer failed: " + mixer.Failed); break; }
             if (sw.Elapsed.TotalHours > MaxHours) { auto = true; break; }
         }
 
+        stopEvent.Set(); quick.Join(2000); // no new device may be opened while we shut down
         // stop captures on a side thread: a dead device must not be able to hang Stop
         Thread t = new Thread(delegate() { try { dm.StopAll(); } catch { } });
         t.IsBackground = true; t.Start(); t.Join(4000);
@@ -302,7 +307,7 @@ static class App
             {
                 string f = Path.Combine(Root, "recpill.log");
                 if (File.Exists(f) && new FileInfo(f).Length > 2000000) File.Delete(f);
-                File.AppendAllText(f, DateTime.Now.ToString("s") + " " + s + "\r\n", new UTF8Encoding(false));
+                File.AppendAllText(f, DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss.fff") + " " + s + "\r\n", new UTF8Encoding(false));
             }
         }
         catch { }
@@ -587,14 +592,22 @@ class DeviceManager
     // cheap check between full polls: sound just started on an idle secondary output -> open it now
     public void QuickPoll()
     {
-        foreach (MMDevice d in candidates.ToArray())
+        MMDevice[] snap;
+        lock (candidates) snap = candidates.ToArray();
+        foreach (MMDevice d in snap)
         {
             lock (sources) if (sources.ContainsKey(d.ID)) continue;
-            DateTime until;
-            if (backoff.TryGetValue(d.ID, out until) && DateTime.UtcNow < until) continue;
+            DateTime until; bool backedOff;
+            lock (backoff) backedOff = backoff.TryGetValue(d.ID, out until) && DateTime.UtcNow < until;
+            if (backedOff) continue;
             float p = 0;
             try { p = d.AudioMeterInformation.MasterPeakValue; } catch { }
-            if (p > 0.0005f) Open(d, true);
+            if (p > 0.0005f)
+            {
+                Stopwatch os = Stopwatch.StartNew();
+                Open(d, true);
+                App.LogLine("quick-open took " + os.ElapsedMilliseconds + " ms (peak " + p.ToString("0.000") + ")");
+            }
         }
     }
 
@@ -607,7 +620,7 @@ class DeviceManager
             foreach (Source s in sources.Values) if (s.Dead) dead.Add(s);
             foreach (Source s in dead) sources.Remove(s.Id);
         }
-        foreach (Source s in dead) { App.LogLine("lost " + Kind(s) + " '" + s.Name + "': " + s.DeadReason); backoff[s.Id] = DateTime.UtcNow.AddSeconds(2); Close(s); }
+        foreach (Source s in dead) { App.LogLine("lost " + Kind(s) + " '" + s.Name + "': " + s.DeadReason); lock (backoff) backoff[s.Id] = DateTime.UtcNow.AddSeconds(2); Close(s); }
 
         Dictionary<string, MMDevice> want = new Dictionary<string, MMDevice>();
         Dictionary<string, bool> wantLoop = new Dictionary<string, bool>();
@@ -615,7 +628,7 @@ class DeviceManager
         // system sound: the default output always; any other real output as soon as something plays on it
         MMDevice defR = Default(DataFlow.Render, Role.Console);
         string defId = defR != null ? defR.ID : null;
-        candidates.Clear();
+        List<MMDevice> cand = new List<MMDevice>();
         foreach (MMDevice d in en.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
         {
             Source have; bool has;
@@ -628,12 +641,14 @@ class DeviceManager
                 take = false;
                 if (!IsVirtual(d))
                 {
-                    candidates.Add(d);
+                    cand.Add(d);
                     try { take = d.AudioMeterInformation.MasterPeakValue > 0.0005f; } catch { }
                 }
             }
             if (take) { want[d.ID] = d; wantLoop[d.ID] = true; }
         }
+
+        lock (candidates) { candidates.Clear(); candidates.AddRange(cand); }
 
         List<MMDevice> caps = new List<MMDevice>();
         foreach (MMDevice d in en.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active)) caps.Add(d);
@@ -654,14 +669,18 @@ class DeviceManager
         foreach (KeyValuePair<string, MMDevice> kv in want)
         {
             lock (sources) if (sources.ContainsKey(kv.Key)) continue;
-            DateTime until;
-            if (backoff.TryGetValue(kv.Key, out until) && DateTime.UtcNow < until) continue;
+            DateTime until; bool backedOff;
+            lock (backoff) backedOff = backoff.TryGetValue(kv.Key, out until) && DateTime.UtcNow < until;
+            if (backedOff) continue;
             Open(kv.Value, wantLoop[kv.Key]);
         }
     }
 
+    readonly HashSet<string> opening = new HashSet<string>();
+
     void Open(MMDevice d, bool loopback)
     {
+        lock (sources) { if (sources.ContainsKey(d.ID) || opening.Contains(d.ID)) return; opening.Add(d.ID); }
         Source s = new Source(mixer);
         s.Id = d.ID; s.Name = d.FriendlyName; s.Loopback = loopback;
         try
@@ -672,10 +691,11 @@ class DeviceManager
         }
         catch (Exception ex)
         {
-            backoff[d.ID] = DateTime.UtcNow.AddSeconds(5);
+            lock (backoff) backoff[d.ID] = DateTime.UtcNow.AddSeconds(5);
             App.LogLine("cannot open " + Kind(s) + " '" + s.Name + "': " + ex.Message);
             s.Close(0);
         }
+        finally { lock (sources) opening.Remove(d.ID); }
     }
 
     static string Kind(Source s) { return s.Loopback ? "output" : "mic"; }
@@ -849,7 +869,7 @@ static class Tools
             using (WaveFileReader r = new WaveFileReader(ms))
             using (WasapiOut o = new WasapiOut(target, AudioClientShareMode.Shared, false, 100))
             {
-                o.Init(r); o.Play();
+                o.Init(r); App.LogLine("say: play starts on '" + target.FriendlyName + "'"); o.Play();
                 while (o.PlaybackState == PlaybackState.Playing) Thread.Sleep(50);
             }
         }
